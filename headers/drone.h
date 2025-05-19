@@ -1,6 +1,5 @@
 #ifndef DRONE_H
 #define DRONE_H
-
 #include "coord.h"
 #include <time.h>
 #include <pthread.h>
@@ -12,23 +11,21 @@ typedef enum {
     DISCONNECTED
 } DroneStatus;
 
-
 typedef struct drone {
     int id;
-    pthread_t thread_id;
-    int status;             // IDLE, ON_MISSION, DISCONNECTED
+    pthread_t thread_id; // Used in Phase 1
+    int status;
     Coord coord;
     Coord target;
     struct tm last_update;
-    pthread_mutex_t lock;   // Per-drone mutex
+    pthread_mutex_t lock;
+    int sock; // Socket descriptor for client communication
 } Drone;
 
-// Global drone list (extern)
 extern List *drones;
-extern Drone *drone_fleet; // Array of drones
-extern int num_drones;    // Number of drones in the fleet
-// Functions
+extern Drone *drone_fleet;
+extern int num_drones;
 void initialize_drones();
-void* drone_behavior(void *arg);
-
+void *drone_behavior(void *arg);
+void cleanup_drones();
 #endif

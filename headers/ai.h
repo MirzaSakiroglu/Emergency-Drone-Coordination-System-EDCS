@@ -2,9 +2,12 @@
 #define AI_H
 
 #include "drone.h"
-#include "survivor.h"
+#include "coord.h"
+#include "list.h"
+#include "communication.h"
 
-// AI Mission Assignment
-void* ai_controller(void *args);
+void assign_mission(Drone *drone, Coord target, const char *mission_id);
+Drone *find_closest_idle_drone(Coord target);
+void *ai_controller(void *arg);
 
 #endif

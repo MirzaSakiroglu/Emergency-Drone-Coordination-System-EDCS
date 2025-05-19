@@ -1,53 +1,36 @@
-/**
- * @file list.h
- * @author adaskin
- * @brief 
- * @version 0.1
- * @date 2024-04-21
- * 
- * @copyright Copyright (c) 2024
- */
 #ifndef LIST_H
 #define LIST_H
-
 #include <time.h>
 #include <pthread.h>
-#include <semaphore.h>
-
 
 typedef struct node {
     struct node *prev;
     struct node *next;
-    // size_t size; /*sizes are fixed for convenience*/
     char occupied;
-    char data[];
+    void *data;
 } Node;
 
 typedef struct list {
     Node *head;
     Node *tail;
-    int number_of_elements; /*TODO: make semaphore*/
-    int capacity;           /*TODO make semaphore*/
-    int datasize; /*only data[] size in the node, e.g. sizeof(Survivor)*/
-    int nodesize;     /*this includes next, prev pointer sizes*/
+    int number_of_elements;
+    int capacity;
+    size_t datasize;
+    size_t nodesize;
     char *startaddress;
     char *endaddress;
     Node *lastprocessed;
-    Node *free_list; /* Track freed nodes */
-
-    pthread_mutex_t lock; /*controls all access to the list*/
-    
-    /*ops on the list*/
+    Node *free_list;
+    pthread_mutex_t lock;
     Node *(*add)(struct list *list, void *data);
-    int  (*removedata)(struct list *list, void *data);
-    int (*removenode)(struct list *list, Node *node); 
-    void *(*pop)(struct list *list, void* dest);
+    int (*removedata)(struct list *list, void *data);
+    int (*removenode)(struct list *list, Node *node);
+    void *(*pop)(struct list *list, void *dest);
     void *(*peek)(struct list *list);
     void (*destroy)(struct list *list);
     void (*printlist)(struct list *list, void (*print)(void*));
     void (*printlistfromtail)(struct list *list, void (*print)(void*));
-
-    struct list *self;     
+    struct list *self;
 } List;
 
 List *create_list(size_t datasize, int capacity);
@@ -59,6 +42,4 @@ void *peek(List *list);
 void destroy(List *list);
 void printlist(List *list, void (*print)(void*));
 void printlistfromtail(List *list, void (*print)(void*));
-
 #endif
-// LIST_H
