@@ -20,6 +20,7 @@ typedef struct drone {
     struct tm last_update;
     pthread_mutex_t lock;
     int sock; // Socket descriptor for client communication
+    char mission_id[32]; // Store current mission ID
 } Drone;
 
 extern List *drones;

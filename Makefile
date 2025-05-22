@@ -14,8 +14,13 @@ ifeq ($(UNAME), Linux)
 	LDFLAGS_APP += -lSDL2 -lm
 endif
 ifeq ($(UNAME), Darwin)
-	LDFLAGS_APP += -F/Library/Frameworks -framework SDL2 -lm
+	CFLAGS += -I/opt/homebrew/include
+	LDFLAGS_APP += -L/opt/homebrew/lib -lSDL2 -lm
+	LDFLAGS_BASE += -L/opt/homebrew/lib
 endif
+
+
+
 
 # Linker flags for the client (no SDL2 needed)
 LDFLAGS_CLIENT = $(LDFLAGS_BASE)

@@ -6,6 +6,9 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <json-c/json.h>
+#include <signal.h>
+
+extern volatile sig_atomic_t global_shutdown_flag;
 
 void assign_mission(Drone *drone, Coord target, const char *mission_id) {
     pthread_mutex_lock(&drone->lock);
@@ -21,8 +24,16 @@ void assign_mission(Drone *drone, Coord target, const char *mission_id) {
     json_object_object_add(mission, "target", target_obj);
     json_object_object_add(mission, "expiry", json_object_new_int64(time(NULL) + 3600));
     json_object_object_add(mission, "checksum", json_object_new_string("a1b2c3"));
+    
+    // Add newline to ensure proper message framing
     const char *json_str = json_object_to_json_string_ext(mission, JSON_C_TO_STRING_PLAIN);
-    send(drone->sock, json_str, strlen(json_str), 0);
+    char *msg = malloc(strlen(json_str) + 2);  // +2 for newline and null terminator
+    if (msg) {
+        sprintf(msg, "%s\n", json_str);
+        send(drone->sock, msg, strlen(msg), 0);
+        free(msg);
+    }
+    
     json_object_put(mission);
     pthread_mutex_unlock(&drone->lock);
 }
@@ -50,21 +61,29 @@ Drone *find_closest_idle_drone(Coord target) {
 }
 
 void *ai_controller(void *arg) {
-    while (1) {
+    printf("AI controller thread started.\n");
+    while (!global_shutdown_flag) {
         pthread_mutex_lock(&survivors->lock);
         Node *node = survivors->head;
-        Survivor *s = node ? (Survivor *)node->data : NULL;
-        if (s) {
-            Drone *closest = find_closest_idle_drone(s->coord);
+        
+        if (node && node->data) {
+            Survivor *s = (Survivor *)node->data;
+            Coord target = s->coord;
+            char mission_id[25];
+            strncpy(mission_id, s->info, sizeof(mission_id) - 1);
+            mission_id[sizeof(mission_id) - 1] = '\0';
+            
+            Drone *closest = find_closest_idle_drone(target);
             if (closest) {
-                assign_mission(closest, s->coord, s->info);
                 printf("Drone %d assigned to survivor %s at (%d, %d)\n",
-                       closest->id, s->info, s->coord.x, s->coord.y);
-                survivors->removenode(survivors, node);
+                       closest->id, mission_id, target.x, target.y);
+                       
+                assign_mission(closest, target, mission_id);
             }
         }
         pthread_mutex_unlock(&survivors->lock);
-        sleep(1);
+        sleep(1);  // Prevent busy-waiting
     }
+    printf("AI controller thread exiting.\n");
     return NULL;
 }

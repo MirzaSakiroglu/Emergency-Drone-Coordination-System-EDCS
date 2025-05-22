@@ -9,6 +9,8 @@
 #include <json-c/json.h>
 #include <time.h>
 #include <errno.h>
+#include <signal.h>
+#include <stdbool.h>
 #include "headers/globals.h"
 #include "headers/ai.h"
 #include "headers/map.h"
@@ -19,6 +21,8 @@
 
 // Forward declaration
 Drone* find_drone_by_id(int id);
+
+extern volatile sig_atomic_t global_shutdown_flag;
 
 #define PORT 8080
 #define MAX_DRONES 10
@@ -39,23 +43,20 @@ typedef struct {
     char client_ip[INET_ADDRSTRLEN];
 } handle_drone_args_t;
 
-void *run_server_loop(void *args) { // Renamed from main
-    int server_fd; // Declaration for server_fd
+void *run_server_loop(void *args) {
+    int server_fd;
     struct sockaddr_in address;
     int opt = 1;
-    int addrlen = sizeof(address);
-    pthread_t thread_id[MAX_CLIENTS];
-    int client_count = 0;
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
-        exit(EXIT_FAILURE);
+        return NULL;
     }
 
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
         perror("setsockopt");
         close(server_fd);
-        exit(EXIT_FAILURE);
+        return NULL;
     }
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
@@ -64,31 +65,48 @@ void *run_server_loop(void *args) { // Renamed from main
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
         close(server_fd);
-        exit(EXIT_FAILURE);
+        return NULL;
     }
     if (listen(server_fd, 3) < 0) {
         perror("listen");
         close(server_fd);
-        exit(EXIT_FAILURE);
+        return NULL;
     }
 
     printf("Server listening on port %d\n", PORT);
 
-    while (1) {
-        int new_socket;
-        struct sockaddr_in client_addr; // Declaration for client_addr
-        socklen_t client_len = sizeof(client_addr);
+    while (!global_shutdown_flag) {
+        fd_set readfds;
+        struct timeval tv;
+        FD_ZERO(&readfds);
+        FD_SET(server_fd, &readfds);
+        tv.tv_sec = 1;  // 1 second timeout
+        tv.tv_usec = 0;
 
-        if ((new_socket = accept(server_fd, (struct sockaddr *)&client_addr, &client_len)) < 0) {
-            if (errno == EINTR) continue; // Interrupted by signal, try again
-            perror("accept");
-            continue; // Or handle error more gracefully
+        int activity = select(server_fd + 1, &readfds, NULL, NULL, &tv);
+        if (activity < 0) {
+            if (errno == EINTR) continue;
+            perror("select error");
+            break;
         }
+        
+        if (activity == 0) continue;  // Timeout, check shutdown flag
+        
+        if (FD_ISSET(server_fd, &readfds)) {
+            int new_socket;
+            struct sockaddr_in client_addr;
+            socklen_t client_len = sizeof(client_addr);
 
-        if (client_count < MAX_CLIENTS) {
+            if ((new_socket = accept(server_fd, (struct sockaddr *)&client_addr, &client_len)) < 0) {
+                if (errno == EINTR) continue;
+                perror("accept");
+                continue;
+            }
+
             char client_ip_str[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &client_addr.sin_addr, client_ip_str, INET_ADDRSTRLEN);
-            printf("Connection accepted from %s:%d on socket %d\n", client_ip_str, ntohs(client_addr.sin_port), new_socket);
+            printf("Connection accepted from %s:%d on socket %d\n", 
+                   client_ip_str, ntohs(client_addr.sin_port), new_socket);
 
             handle_drone_args_t *thread_args = malloc(sizeof(handle_drone_args_t));
             if (!thread_args) {
@@ -99,22 +117,18 @@ void *run_server_loop(void *args) { // Renamed from main
             thread_args->sock = new_socket;
             strncpy(thread_args->client_ip, client_ip_str, INET_ADDRSTRLEN);
             
-            if (pthread_create(&thread_id[client_count], NULL, handle_drone, thread_args) != 0) {
+            pthread_t thread_id;
+            if (pthread_create(&thread_id, NULL, handle_drone, thread_args) != 0) {
                 perror("pthread_create failed for handle_drone");
                 free(thread_args);
                 close(new_socket);
-            } else {
-                client_count++; // Only increment if thread creation was successful
             }
-        } else {
-            printf("Max clients reached. Connection rejected.\n");
-            close(new_socket);
+            pthread_detach(thread_id);  // Automatically clean up thread when it exits
         }
     }
 
-    // Cleanup (though this part of the loop might not be reached in typical server)
+    printf("Server shutting down...\n");
     close(server_fd);
-    // freemap, destroy lists etc. should be handled by the main controller on shutdown
     return NULL;
 }
 
@@ -125,29 +139,30 @@ void *handle_drone(void *arg) {
     strncpy(client_ip, thread_args->client_ip, INET_ADDRSTRLEN);
     free(thread_args);
 
-    while (1) {
+    // Set socket timeout
+    struct timeval tv;
+    tv.tv_sec = 5;  // 5 second timeout
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+
+    Drone *current_drone = NULL;  // Keep track of the drone for cleanup
+
+    while (!global_shutdown_flag) {
         struct json_object *jobj = receive_json(sock);
         if (!jobj) {
-            printf("No data received or client disconnected on sock %d\n", sock);
-            pthread_mutex_lock(&drones->lock);
-            Node *node = drones->head;
-            while (node != NULL) {
-                Drone *d = (Drone *)node->data;
-                if (d->sock == sock) {
-                    pthread_mutex_lock(&d->lock);
-                    d->status = DISCONNECTED;
-                    pthread_mutex_unlock(&d->lock);
-                    break;
-                }
-                node = node->next;
+            printf("Client disconnected or error on socket %d\n", sock);
+            if (current_drone) {
+                pthread_mutex_lock(&current_drone->lock);
+                current_drone->status = DISCONNECTED;
+                pthread_mutex_unlock(&current_drone->lock);
             }
-            pthread_mutex_unlock(&drones->lock);
             close(sock);
             break;
         }
 
         const char *type = json_object_get_string(json_object_object_get(jobj, "type"));
         printf("Received message on sock %d: type=%s\n", sock, type ? type : "NULL");
+        
         if (!type) {
             struct json_object *error = json_object_new_object();
             json_object_object_add(error, "type", json_object_new_string("ERROR"));
@@ -157,6 +172,15 @@ void *handle_drone(void *arg) {
             json_object_put(error);
         } else if (strcmp(type, "HANDSHAKE") == 0) {
             process_handshake(sock, jobj, client_ip);
+            // After handshake, get the drone object for this connection
+            struct json_object *drone_id_obj;
+            if (json_object_object_get_ex(jobj, "drone_id", &drone_id_obj)) {
+                const char *drone_id_str = json_object_get_string(drone_id_obj);
+                int id_val;
+                if (sscanf(drone_id_str, "D%d", &id_val) == 1) {
+                    current_drone = find_drone_by_id(id_val);
+                }
+            }
         } else if (strcmp(type, "STATUS_UPDATE") == 0) {
             process_status_update(sock, jobj);
         } else if (strcmp(type, "MISSION_COMPLETE") == 0) {
@@ -174,6 +198,14 @@ void *handle_drone(void *arg) {
 
         json_object_put(jobj);
     }
+
+    // Cleanup on thread exit
+    if (current_drone) {
+        pthread_mutex_lock(&current_drone->lock);
+        current_drone->status = DISCONNECTED;
+        pthread_mutex_unlock(&current_drone->lock);
+    }
+    close(sock);
     return NULL;
 }
 
@@ -250,8 +282,21 @@ void process_handshake(int sock, struct json_object *jobj, const char* client_ip
         new_drone->id = new_drone_id_val;
         new_drone->sock = sock;
         new_drone->status = IDLE;
+        
+        // Ensure drone spawns within valid map bounds
         new_drone->coord.x = rand() % map.width;
         new_drone->coord.y = rand() % map.height;
+        
+        // Validate coordinates
+        if (new_drone->coord.x < 0 || new_drone->coord.x >= map.width || 
+            new_drone->coord.y < 0 || new_drone->coord.y >= map.height) {
+            printf("Generated invalid drone coordinates, fixing to valid range\n");
+            new_drone->coord.x = new_drone->coord.x % map.width;
+            new_drone->coord.y = new_drone->coord.y % map.height;
+            if (new_drone->coord.x < 0) new_drone->coord.x = 0;
+            if (new_drone->coord.y < 0) new_drone->coord.y = 0;
+        }
+        
         new_drone->target.x = 0;
         new_drone->target.y = 0;
         
@@ -288,53 +333,176 @@ void process_handshake(int sock, struct json_object *jobj, const char* client_ip
 }
 
 void process_status_update(int sock, struct json_object *jobj) {
-    struct json_object *drone_id_obj, *loc_obj, *status_obj, *timestamp_obj;
-    struct json_object *battery_obj, *speed_obj;
-
-    if (!json_object_object_get_ex(jobj, "drone_id", &drone_id_obj) ||
-        !json_object_object_get_ex(jobj, "location", &loc_obj) ||
-        !json_object_object_get_ex(jobj, "status", &status_obj) ||
-        !json_object_object_get_ex(jobj, "timestamp", &timestamp_obj) ||
-        !json_object_object_get_ex(jobj, "battery", &battery_obj) ||
-        !json_object_object_get_ex(jobj, "speed", &speed_obj) ) {
-        fprintf(stderr, "STATUS_UPDATE missing fields.\n");
-        return;
-    }
-    const char *drone_id_str = json_object_get_string(drone_id_obj);
-    int id_val;
-     if (sscanf(drone_id_str, "D%d", &id_val) != 1) {
-        fprintf(stderr, "Invalid drone_id format in STATUS_UPDATE: %s\n", drone_id_str);
-        return;
-    }
-
-    Drone *drone = find_drone_by_id(id_val);
-    if (!drone) {
-        fprintf(stderr, "Drone %s not found for STATUS_UPDATE.\n", drone_id_str);
-        return;
-    }
-
-    pthread_mutex_lock(&drone->lock);
-    struct json_object *x_obj, *y_obj;
-    if (json_object_object_get_ex(loc_obj, "x", &x_obj) && json_object_object_get_ex(loc_obj, "y", &y_obj)) {
-        drone->coord.x = json_object_get_int(x_obj);
-        drone->coord.y = json_object_get_int(y_obj);
-    }
-
-    const char *status_str = json_object_get_string(status_obj);
-    if (strcmp(status_str, "idle") == 0) {
-        drone->status = IDLE;
-    } else if (strcmp(status_str, "busy") == 0) {
-        drone->status = ON_MISSION;
-    } else if (strcmp(status_str, "charging") == 0) {
-        // drone->status = CHARGING; // If you add this enum state
+    const char *drone_id = json_object_get_string(json_object_object_get(jobj, "drone_id"));
+    struct json_object *loc = json_object_object_get(jobj, "location");
+    int new_x = json_object_get_int(json_object_object_get(loc, "x"));
+    int new_y = json_object_get_int(json_object_object_get(loc, "y"));
+    const char *status_str = json_object_get_string(json_object_object_get(jobj, "status"));
+    DroneStatus new_status = strcmp(status_str, "idle") == 0 ? IDLE : ON_MISSION;
+    
+    // Extract drone ID number
+    int drone_num;
+    sscanf(drone_id + 1, "%d", &drone_num);
+    
+    pthread_mutex_lock(&drones->lock);
+    Node *current = drones->head;
+    Drone *drone = NULL;
+    
+    while (current != NULL) {
+        Drone *d = (Drone *)current->data;
+        if (d->id == drone_num) {
+            drone = d;
+            break;
+        }
+        current = current->next;
     }
     
-    time_t now;
-    time(&now);
-    drone->last_update = *localtime(&now);
-
-    printf("Drone %s (ID: %d) updated: loc=(%d,%d), status=%s\n", drone_id_str, drone->id, drone->coord.x, drone->coord.y, status_str);
-    pthread_mutex_unlock(&drone->lock);
+    if (drone) {
+        pthread_mutex_lock(&drone->lock);
+        printf("[DEBUG] Drone %d position update: (%d,%d) -> (%d,%d)\n",
+               drone->id, drone->coord.x, drone->coord.y, new_x, new_y);
+        drone->coord.x = new_x;
+        drone->coord.y = new_y;
+        drone->status = new_status;
+        printf("[DEBUG] Drone %s (ID: %d) final state: loc=(%d,%d), status=%s\n",
+               drone_id, drone->id, drone->coord.x, drone->coord.y,
+               drone->status == IDLE ? "idle" : "busy");
+        pthread_mutex_unlock(&drone->lock);
+    }
+    pthread_mutex_unlock(&drones->lock);
+    
+    // Check if drone is at a survivor's position
+    printf("[DEBUG] Checking if drone %s is at a survivor position (%d,%d)\n", drone_id, new_x, new_y);
+    
+    // Acquire all locks needed in the correct order to prevent deadlocks
+    // First lock map cell if coordinates are valid
+    if (new_x >= 0 && new_x < map.width && new_y >= 0 && new_y < map.height) {
+        pthread_mutex_lock(&map.cells[new_y][new_x].survivors->lock);
+    }
+    
+    pthread_mutex_lock(&survivors->lock);
+    pthread_mutex_lock(&helpedsurvivors->lock);
+    
+    Node* survivor_current = survivors->head;
+    Node* prev = NULL;
+    bool found_survivor = false;
+    
+    // Debug info - print all survivors
+    printf("[DEBUG] Current survivors in global list:\n");
+    Node* debug_node = survivors->head;
+    while (debug_node != NULL) {
+        Survivor* s = (Survivor*)debug_node->data;
+        printf("[DEBUG] - Survivor at (%d,%d), info=%s\n", s->coord.x, s->coord.y, s->info);
+        debug_node = debug_node->next;
+    }
+    
+    while (survivor_current != NULL && !found_survivor) {
+        Survivor* s = (Survivor*)survivor_current->data;
+        printf("[DEBUG] Checking survivor position (%d,%d) against drone position (%d,%d)\n", 
+               s->coord.x, s->coord.y, new_x, new_y);
+        
+        if (new_x == s->coord.x && new_y == s->coord.y) {
+            printf("[DEBUG] Found survivor %s at (%d,%d) for removal.\n", 
+                   s->info, s->coord.x, s->coord.y);
+            
+            // Create mission complete message
+            struct json_object *complete_msg = json_object_new_object();
+            json_object_object_add(complete_msg, "type", json_object_new_string("MISSION_COMPLETE"));
+            json_object_object_add(complete_msg, "drone_id", json_object_new_string(drone_id));
+            json_object_object_add(complete_msg, "mission_id", json_object_new_string(s->info));
+            json_object_object_add(complete_msg, "success", json_object_new_boolean(true));
+            json_object_object_add(complete_msg, "details", json_object_new_string("Delivered aid to survivor"));
+            
+            // Send mission complete message
+            send_json(sock, complete_msg);
+            json_object_put(complete_msg);
+            
+            // Create a copy for helped survivors list
+            Survivor* helped_survivor = (Survivor*)malloc(sizeof(Survivor));
+            if (!helped_survivor) {
+                perror("Failed to allocate memory for helped survivor");
+            } else {
+                memcpy(helped_survivor, s, sizeof(Survivor));
+                helped_survivor->status = 1; // Mark as helped
+                time_t now;
+                time(&now);
+                helped_survivor->helped_time = *localtime(&now);
+                
+                // Add to helped survivors list
+                Node* added = add(helpedsurvivors, helped_survivor);
+                if (added) {
+                    printf("[DEBUG] Added survivor %s to helped list\n", s->info);
+                } else {
+                    printf("[ERROR] Failed to add survivor to helped list\n");
+                    free(helped_survivor);
+                }
+            }
+            
+            // Remove from map cell if coordinates are valid
+            if (s->coord.x >= 0 && s->coord.x < map.width && 
+                s->coord.y >= 0 && s->coord.y < map.height) {
+                
+                List* cell_list = map.cells[s->coord.y][s->coord.x].survivors;
+                Node* cell_node = cell_list->head;
+                
+                printf("[DEBUG] Attempting to remove survivor from map cell (%d,%d)\n", s->coord.x, s->coord.y);
+                while (cell_node != NULL) {
+                    Survivor* cell_surv = (Survivor*)cell_node->data;
+                    if (cell_surv == s) {
+                        printf("[DEBUG] Found survivor in map cell, removing directly\n");
+                        int result = cell_list->removenode(cell_list, cell_node);
+                        printf("[DEBUG] Remove from map cell result: %d\n", result);
+                        break;
+                    }
+                    cell_node = cell_node->next;
+                }
+            }
+            
+            // Remove the survivor from the global list
+            if (prev == NULL) {
+                survivors->head = survivor_current->next;
+            } else {
+                prev->next = survivor_current->next;
+            }
+            
+            // Free the survivor node but not the data (it's now in helped survivors list)
+            printf("[DEBUG] Freeing survivor node from global list\n");
+            free(survivor_current);
+            
+            // Update drone status to idle if we have a drone reference
+            if (drone) {
+                pthread_mutex_lock(&drone->lock);
+                drone->status = IDLE;
+                pthread_mutex_unlock(&drone->lock);
+                printf("[DEBUG] Updated drone %d status to IDLE\n", drone_num);
+            }
+            
+            found_survivor = true;
+            
+            // Spawn a new survivor immediately
+            printf("[DEBUG] Spawning a new survivor after rescue\n");
+            pthread_t temp_thread;
+            pthread_create(&temp_thread, NULL, survivor_generator, NULL);
+            pthread_detach(temp_thread);
+        } else {
+            prev = survivor_current;
+            survivor_current = survivor_current->next;
+        }
+    }
+    
+    // Release locks in the reverse order
+    pthread_mutex_unlock(&helpedsurvivors->lock);
+    pthread_mutex_unlock(&survivors->lock);
+    
+    if (new_x >= 0 && new_x < map.width && new_y >= 0 && new_y < map.height) {
+        pthread_mutex_unlock(&map.cells[new_y][new_x].survivors->lock);
+    }
+    
+    if (found_survivor) {
+        printf("[DEBUG] Successfully processed survivor rescue at position (%d,%d)\n", new_x, new_y);
+    } else {
+        printf("[DEBUG] No survivor found at drone position (%d,%d)\n", new_x, new_y);
+    }
 }
 
 void process_mission_complete(int sock, struct json_object *jobj) {
@@ -361,59 +529,114 @@ void process_mission_complete(int sock, struct json_object *jobj) {
         return;
     }
 
+    printf("[DEBUG] Processing MISSION_COMPLETE for drone %s, mission %s\n", drone_id_str, mission_id);
+    printf("[DEBUG] Drone position is (%d,%d)\n", drone->coord.x, drone->coord.y);
+    
+    // FIX: Lock order to prevent deadlock
+    pthread_mutex_lock(&map.cells[drone->coord.y][drone->coord.x].survivors->lock);
+    pthread_mutex_lock(&survivors->lock);
+    pthread_mutex_lock(&helpedsurvivors->lock);
     pthread_mutex_lock(&drone->lock);
+
     if (success) {
-        drone->status = IDLE;
         printf("Drone %s (ID: %d) completed mission %s successfully.\n", drone_id_str, drone->id, mission_id);
+        
+        // Set drone to IDLE immediately
+        drone->status = IDLE;
+        printf("[DEBUG] Drone %d set to IDLE at (%d, %d).\n", drone->id, drone->coord.x, drone->coord.y);
 
-        pthread_mutex_lock(&survivors->lock);
-        pthread_mutex_lock(&helpedsurvivors->lock);
-        Node* current_survivor_node = survivors->head;
-        Survivor* found_survivor_data = NULL;
-        Node* survivor_node_to_remove = NULL;
-
-        while(current_survivor_node != NULL) {
-            Survivor* s = (Survivor*)current_survivor_node->data;
-            if (strcmp(s->info, mission_id) == 0) {
-                found_survivor_data = (Survivor*)malloc(sizeof(Survivor));
-                if (found_survivor_data) {
-                    memcpy(found_survivor_data, s, sizeof(Survivor));
-                    found_survivor_data->status = 1;
-                    time_t now;
-                    time(&now);
-                    found_survivor_data->helped_time = *localtime(&now);
-                    
-                    if (helpedsurvivors->add(helpedsurvivors, found_survivor_data) != NULL) {
-                        printf("Survivor %s moved to helped list.\n", mission_id);
-                    } else {
-                        fprintf(stderr, "Failed to add survivor %s to helped list.\n", mission_id);
-                        free(found_survivor_data);
-                    }
-                } else {
-                    perror("Malloc failed for survivor copy");
-                }
-                survivor_node_to_remove = current_survivor_node;
+        // Find the survivor at the drone's current position
+        Survivor* found_survivor = NULL;
+        Node* current = survivors->head;
+        
+        printf("[DEBUG] Searching for survivor at coordinates (%d,%d)\n", drone->coord.x, drone->coord.y);
+        
+        while (current != NULL) {
+            Survivor* s = (Survivor*)current->data;
+            printf("[DEBUG] Checking survivor at (%d,%d), info=%s\n", s->coord.x, s->coord.y, s->info);
+            
+            if (s->coord.x == drone->coord.x && s->coord.y == drone->coord.y) {
+                found_survivor = s;
+                printf("[DEBUG] FOUND MATCHING SURVIVOR at (%d,%d)\n", s->coord.x, s->coord.y);
                 break;
             }
-            current_survivor_node = current_survivor_node->next;
+            current = current->next;
         }
 
-        if (survivor_node_to_remove) {
-            Survivor* s_to_free = (Survivor*)survivor_node_to_remove->data;
-            if (survivors->removenode(survivors, survivor_node_to_remove) == 0) {
-                printf("Survivor %s removed from active list.\n", mission_id);
+        if (found_survivor) {
+            printf("[DEBUG] Found survivor at drone's position: %s at (%d,%d)\n", 
+                   found_survivor->info, found_survivor->coord.x, found_survivor->coord.y);
+
+            // Create a copy for the helped survivors list
+            Survivor* helped_survivor = (Survivor*)malloc(sizeof(Survivor));
+            if (helped_survivor) {
+                memcpy(helped_survivor, found_survivor, sizeof(Survivor));
+                helped_survivor->status = 1;
+                time_t now;
+                time(&now);
+                helped_survivor->helped_time = *localtime(&now);
+                
+                // Add to helped survivors list
+                Node* added = helpedsurvivors->add(helpedsurvivors, helped_survivor);
+                if (added != NULL) {
+                    printf("[DEBUG] Survivor %s added to helped list.\n", found_survivor->info);
+                    
+                    // First, remove from map cell using direct removal
+                    List* cell_list = map.cells[found_survivor->coord.y][found_survivor->coord.x].survivors;
+                    Node* cell_node = cell_list->head;
+                    while (cell_node != NULL) {
+                        Survivor* cell_surv = (Survivor*)cell_node->data;
+                        if (cell_surv == found_survivor) {
+                            printf("[DEBUG] Found survivor in map cell, removing directly\n");
+                            int result = cell_list->removenode(cell_list, cell_node);
+                            printf("[DEBUG] Remove from map cell result: %d\n", result);
+                            break;
+                        }
+                        cell_node = cell_node->next;
+                    }
+                    
+                    // Then remove from global survivors list
+                    int result = survivors->removedata(survivors, found_survivor);
+                    if (result == 0) {
+                        printf("[DEBUG] Successfully removed survivor %s from global list\n", found_survivor->info);
+                        free(found_survivor); // Free original after successful removal
+                    } else {
+                        printf("[ERROR] Failed to remove survivor from global list\n");
+                    }
+                    
+                } else {
+                    fprintf(stderr, "[DEBUG] Failed to add survivor %s to helped list.\n", found_survivor->info);
+                    free(helped_survivor);
+                }
             } else {
-                fprintf(stderr, "Failed to remove survivor %s from active list.\n", mission_id);
+                perror("Failed to allocate memory for helped survivor");
+            }
+        } else {
+            printf("[DEBUG] No survivor found at drone's position (%d,%d)\n", drone->coord.x, drone->coord.y);
+            
+            // Additional debugging - print all survivors
+            Node* debug_node = survivors->head;
+            printf("[DEBUG] All survivors in global list:\n");
+            while (debug_node != NULL) {
+                Survivor* s = (Survivor*)debug_node->data;
+                printf("[DEBUG] - Survivor at (%d,%d), info=%s\n", s->coord.x, s->coord.y, s->info);
+                debug_node = debug_node->next;
             }
         }
-        pthread_mutex_unlock(&helpedsurvivors->lock);
-        pthread_mutex_unlock(&survivors->lock);
 
+        // Immediately spawn a new survivor
+        printf("[DEBUG] Spawning a new survivor after mission complete.\n");
+        pthread_t temp_thread;
+        pthread_create(&temp_thread, NULL, survivor_generator, NULL);
+        pthread_detach(temp_thread);
     } else {
-        drone->status = IDLE;
         printf("Drone %s (ID: %d) failed mission %s.\n", drone_id_str, drone->id, mission_id);
     }
+    
     pthread_mutex_unlock(&drone->lock);
+    pthread_mutex_unlock(&helpedsurvivors->lock);
+    pthread_mutex_unlock(&survivors->lock);
+    pthread_mutex_unlock(&map.cells[drone->coord.y][drone->coord.x].survivors->lock);
 }
 
 void process_heartbeat_response(int sock, struct json_object *jobj) {
