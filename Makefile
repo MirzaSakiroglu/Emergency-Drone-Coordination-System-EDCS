@@ -4,39 +4,47 @@ UNAME := $(shell uname -s)
 # Compiler and flags
 CC = gcc
 CFLAGS = -Wall -g -pthread -Iheaders
-LDFLAGS = -ljson-c -lSDL2
 
-# Platform-specific SDL2 flags
+# Base Linker flags (pthread and json-c are common)
+LDFLAGS_BASE = -pthread -ljson-c
+
+# Platform-specific SDL2 flags (only for the main app)
+LDFLAGS_APP = $(LDFLAGS_BASE)
 ifeq ($(UNAME), Linux)
-	LDFLAGS += -lSDL2
+	LDFLAGS_APP += -lSDL2 -lm
 endif
 ifeq ($(UNAME), Darwin)
-	LDFLAGS += -F/Library/Frameworks -framework SDL2
+	LDFLAGS_APP += -F/Library/Frameworks -framework SDL2 -lm
 endif
 
+# Linker flags for the client (no SDL2 needed)
+LDFLAGS_CLIENT = $(LDFLAGS_BASE)
+
 # Source files
-SERVER_SRC = server.c list.c map.c survivor.c ai.c view.c globals.c communication.c
+APP_SRC = controller.c server.c drone.c list.c map.c survivor.c ai.c view.c globals.c
 CLIENT_SRC = drone_client.c
-HEADERS = headers/list.h headers/map.h headers/drone.h headers/survivor.h headers/ai.h headers/coord.h headers/globals.h headers/view.h
+HEADERS = headers/list.h headers/map.h headers/drone.h headers/survivor.h \
+          headers/ai.h headers/coord.h headers/globals.h headers/view.h \
+          headers/server.h
 
 # Object files
-SERVER_OBJ = $(SERVER_SRC:.c=.o)
+APP_OBJ = $(APP_SRC:.c=.o)
 CLIENT_OBJ = $(CLIENT_SRC:.c=.o)
 
 # Executables
-SERVER = server
-CLIENT = drone_client
+APP_EXE = server
+CLIENT_EXE = drone
 
 # Default target
-all: $(SERVER) $(CLIENT)
+all: $(APP_EXE) $(CLIENT_EXE)
 
-# Server executable
-$(SERVER): $(SERVER_OBJ)
-	$(CC) $(SERVER_OBJ) -o $(SERVER) $(LDFLAGS)
+# Main application executable
+$(APP_EXE): $(APP_OBJ)
+	$(CC) $(APP_OBJ) -o $(APP_EXE) $(LDFLAGS_APP)
 
 # Client executable
-$(CLIENT): $(CLIENT_OBJ)
-	$(CC) $(CLIENT_OBJ) -o $(CLIENT) $(LDFLAGS)
+$(CLIENT_EXE): $(CLIENT_OBJ)
+	$(CC) $(CLIENT_OBJ) -o $(CLIENT_EXE) $(LDFLAGS_CLIENT)
 
 # Compile source files to object files
 %.o: %.c $(HEADERS)
@@ -44,7 +52,7 @@ $(CLIENT): $(CLIENT_OBJ)
 
 # Clean up
 clean:
-	rm -f *.o $(SERVER) $(CLIENT)
+	rm -f *.o $(APP_EXE) $(CLIENT_EXE)
 
 # Phony targets
 .PHONY: all clean

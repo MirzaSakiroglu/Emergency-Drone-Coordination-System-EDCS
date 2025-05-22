@@ -1,5 +1,4 @@
 #include "headers/ai.h"
-#include "headers/survivor.h"
 #include <limits.h>
 #include <stdio.h>
 #include <string.h> 
@@ -22,7 +21,8 @@ void assign_mission(Drone *drone, Coord target, const char *mission_id) {
     json_object_object_add(mission, "target", target_obj);
     json_object_object_add(mission, "expiry", json_object_new_int64(time(NULL) + 3600));
     json_object_object_add(mission, "checksum", json_object_new_string("a1b2c3"));
-    send_json(drone->sock, mission);
+    const char *json_str = json_object_to_json_string_ext(mission, JSON_C_TO_STRING_PLAIN);
+    send(drone->sock, json_str, strlen(json_str), 0);
     json_object_put(mission);
     pthread_mutex_unlock(&drone->lock);
 }
@@ -52,13 +52,15 @@ Drone *find_closest_idle_drone(Coord target) {
 void *ai_controller(void *arg) {
     while (1) {
         pthread_mutex_lock(&survivors->lock);
-        Survivor *s = (Survivor *)survivors->peek(survivors);
+        Node *node = survivors->head;
+        Survivor *s = node ? (Survivor *)node->data : NULL;
         if (s) {
             Drone *closest = find_closest_idle_drone(s->coord);
             if (closest) {
                 assign_mission(closest, s->coord, s->info);
                 printf("Drone %d assigned to survivor %s at (%d, %d)\n",
                        closest->id, s->info, s->coord.x, s->coord.y);
+                survivors->removenode(survivors, node);
             }
         }
         pthread_mutex_unlock(&survivors->lock);

@@ -7,7 +7,7 @@ typedef struct node {
     struct node *prev;
     struct node *next;
     char occupied;
-    void *data;
+    char data[];
 } Node;
 
 typedef struct list {
@@ -15,8 +15,8 @@ typedef struct list {
     Node *tail;
     int number_of_elements;
     int capacity;
-    size_t datasize;
-    size_t nodesize;
+    int datasize;
+    int nodesize;
     char *startaddress;
     char *endaddress;
     Node *lastprocessed;

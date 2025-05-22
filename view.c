@@ -4,219 +4,202 @@
 #include "headers/survivor.h"
 #include "headers/view.h"
 #include "headers/globals.h"
+#include <SDL2/SDL_rect.h>
+#include <SDL2/SDL_render.h>
 #include <stdio.h>
-#include <pthread.h>
 
+#define GRID_SIZE 30
 #define CELL_SIZE 20
 
 SDL_Window* window = NULL;
 SDL_Renderer* renderer = NULL;
 SDL_Event event;
 int window_width, window_height;
-int running = 1;  // Add running flag
-
-// Thread safety
-pthread_mutex_t view_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 const SDL_Color BLACK = {0, 0, 0, 255};
 const SDL_Color RED = {255, 0, 0, 255};
 const SDL_Color BLUE = {0, 0, 255, 255};
 const SDL_Color GREEN = {0, 255, 0, 255};
-const SDL_Color YELLOW = {255, 255, 0, 255};  // For assigned survivors
 const SDL_Color WHITE = {255, 255, 255, 255};
+const SDL_Color YELLOW = {255, 255, 0, 255};
+const SDL_Color GRAY = {128, 128, 128, 255};
 
 int init_sdl_window() {
-    printf("Initializing SDL window with dimensions: %dx%d\n", map.width * CELL_SIZE, map.height * CELL_SIZE);
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
-        printf("SDL initialization failed: %s\n", SDL_GetError());
-        return 1;
+        fprintf(stderr, "SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
+        return -1;
     }
-    printf("SDL initialized successfully\n");
 
     window_width = map.width * CELL_SIZE;
     window_height = map.height * CELL_SIZE;
 
-    window = SDL_CreateWindow("Drone Coordination System",
-                            SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-                            window_width, window_height,
-                            SDL_WINDOW_SHOWN);
-    if (!window) {
-        printf("Window creation failed: %s\n", SDL_GetError());
-        SDL_Quit();
-        return 1;
+    if (window_width <= 0 || window_height <= 0) {
+        fprintf(stderr, "Map dimensions are invalid. Width: %d, Height: %d\n", map.width, map.height);
+        window_width = 800;
+        window_height = 600;
     }
-    printf("SDL window created successfully\n");
 
-    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    if (!renderer) {
-        printf("Renderer creation failed: %s\n", SDL_GetError());
+    window = SDL_CreateWindow("Drone Simulator", SDL_WINDOWPOS_UNDEFINED,
+                             SDL_WINDOWPOS_UNDEFINED, window_width,
+                             window_height, SDL_WINDOW_SHOWN);
+    if (window == NULL) {
+        fprintf(stderr, "Window could not be created! SDL_Error: %s\n", SDL_GetError());
+        SDL_Quit();
+        return -1;
+    }
+
+    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (renderer == NULL) {
         SDL_DestroyWindow(window);
+        fprintf(stderr, "Renderer could not be created! SDL_Error: %s\n", SDL_GetError());
         SDL_Quit();
-        return 1;
+        return -1;
     }
-    printf("SDL renderer created successfully\n");
 
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    printf("SDL Initialized. Window: %dx%d\n", window_width, window_height);
     return 0;
 }
 
 void draw_cell(int x, int y, SDL_Color color) {
-    SDL_Rect rect = {
-        .x = x * CELL_SIZE,
-        .y = y * CELL_SIZE,
-                     .w = CELL_SIZE,
-        .h = CELL_SIZE
-    };
+    if (!renderer) return;
+    SDL_Rect cell_rect;
+    cell_rect.x = x * CELL_SIZE;
+    cell_rect.y = y * CELL_SIZE;
+    cell_rect.w = CELL_SIZE;
+    cell_rect.h = CELL_SIZE;
     SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
-    SDL_RenderFillRect(renderer, &rect);
+    SDL_RenderFillRect(renderer, &cell_rect);
 }
 
 void draw_drones() {
-    pthread_mutex_lock(&view_mutex);
+    if (!drones || !renderer) return;
+
     pthread_mutex_lock(&drones->lock);
-    Node *node = drones->head;
-    int count = 0;
-    while (node != NULL) {
-        Drone *d = (Drone *)node->data;
-        pthread_mutex_lock(&d->lock);
-        printf("Drawing drone at (%d, %d) with status %d\n", d->coord.x, d->coord.y, d->status);
-        // Draw drone with appropriate color
-        SDL_Color color = (d->status == IDLE) ? BLUE : GREEN;
-        draw_cell(d->coord.x, d->coord.y, color);
-        
-        // Draw mission line if on mission
-        if (d->status == ON_MISSION) {
-            SDL_SetRenderDrawColor(renderer, GREEN.r, GREEN.g, GREEN.b, GREEN.a);
-            SDL_RenderDrawLine(
-                renderer,
-                d->coord.y * CELL_SIZE + CELL_SIZE / 2,
-                d->coord.x * CELL_SIZE + CELL_SIZE / 2,
-                d->target.y * CELL_SIZE + CELL_SIZE / 2,
-                d->target.x * CELL_SIZE + CELL_SIZE / 2);
+    Node *current = drones->head;
+    while (current != NULL) {
+        Drone *drone = (Drone *)current->data;
+        if (drone) {
+            pthread_mutex_lock(&drone->lock);
+
+            SDL_Color drone_color;
+            switch (drone->status) {
+                case IDLE:
+                    drone_color = BLUE;
+                    break;
+                case ON_MISSION:
+                    drone_color = GREEN;
+                    break;
+                case DISCONNECTED:
+                    drone_color = GRAY;
+                    break;
+                default:
+                    drone_color = YELLOW;
+                    break;
+            }
+
+            if (drone->coord.x >= 0 && drone->coord.x < map.width &&
+                drone->coord.y >= 0 && drone->coord.y < map.height) {
+                printf("Drawing drone %d at (%d, %d), status=%d\n", drone->id, drone->coord.x, drone->coord.y, drone->status);
+                draw_cell(drone->coord.x, drone->coord.y, drone_color);
+
+                if (drone->status == ON_MISSION) {
+                    if (drone->target.x >= 0 && drone->target.x < map.width &&
+                        drone->target.y >= 0 && drone->target.y < map.height) {
+                        SDL_SetRenderDrawColor(renderer, GREEN.r, GREEN.g, GREEN.b, 200);
+                        SDL_RenderDrawLine(renderer, 
+                                         drone->coord.x * CELL_SIZE + CELL_SIZE / 2, 
+                                         drone->coord.y * CELL_SIZE + CELL_SIZE / 2, 
+                                         drone->target.x * CELL_SIZE + CELL_SIZE / 2, 
+                                         drone->target.y * CELL_SIZE + CELL_SIZE / 2);
+                    }
+                }
+            }
+            pthread_mutex_unlock(&drone->lock);
         }
-        
-        pthread_mutex_unlock(&d->lock);
-        node = node->next;
-        count++;
+        current = current->next;
     }
     pthread_mutex_unlock(&drones->lock);
-    printf("Drew %d drones\n", count);
-    pthread_mutex_unlock(&view_mutex);
 }
 
 void draw_survivors() {
-    pthread_mutex_lock(&view_mutex);
+    static int last_count = -1;
+    if (!survivors || !renderer) return;
+
     pthread_mutex_lock(&survivors->lock);
-    Node *node = survivors->head;
+    Node *current = survivors->head;
     int count = 0;
-    while (node != NULL) {
-        Survivor *s = (Survivor *)node->data;
-        pthread_mutex_lock(&s->lock);
-        printf("Drawing survivor at (%d, %d) with status %d\n", s->coord.x, s->coord.y, s->status);
-        // Draw survivor with appropriate color
-        SDL_Color color = (s->status == WAITING) ? RED : YELLOW;
-        draw_cell(s->coord.x, s->coord.y, color);
-        pthread_mutex_unlock(&s->lock);
-        node = node->next;
+    while (current != NULL) {
         count++;
+        Survivor *s = (Survivor *)current->data;
+        if (s) {
+            if (s->coord.x >= 0 && s->coord.x < map.width &&
+                s->coord.y >= 0 && s->coord.y < map.height) {
+                draw_cell(s->coord.x, s->coord.y, RED);
+            }
+        }
+        current = current->next;
+    }
+    if (count != last_count) {
+        printf("draw_survivors: survivors in list = %d\n", count);
+        last_count = count;
     }
     pthread_mutex_unlock(&survivors->lock);
-    printf("Drew %d survivors\n", count);
 
-    // Draw helped survivors
+    if (!helpedsurvivors || !renderer) return;
     pthread_mutex_lock(&helpedsurvivors->lock);
-    node = helpedsurvivors->head;
-    count = 0;
-    while (node != NULL) {
-        Survivor *s = (Survivor *)node->data;
-        pthread_mutex_lock(&s->lock);
-        printf("Drawing helped survivor at (%d, %d)\n", s->coord.x, s->coord.y);
-        draw_cell(s->coord.x, s->coord.y, YELLOW);
-        pthread_mutex_unlock(&s->lock);
-        count++;
-        node = node->next;
+    current = helpedsurvivors->head;
+    while(current != NULL) {
+        Survivor* s = (Survivor*)current->data;
+        if (s) {
+            if (s->coord.x >= 0 && s->coord.x < map.width &&
+                s->coord.y >= 0 && s->coord.y < map.height) {
+                SDL_Color helped_survivor_color = {255, 100, 100, 255};
+                draw_cell(s->coord.x, s->coord.y, helped_survivor_color);
+            }
+        }
+        current = current->next;
     }
-    printf("Drew %d helped survivors\n", count);
     pthread_mutex_unlock(&helpedsurvivors->lock);
-    pthread_mutex_unlock(&view_mutex);
 }
 
 void draw_grid() {
-    if (!renderer) {
-        printf("Renderer is NULL!\n");
-        return;
+    if (!renderer || map.width <= 0 || map.height <= 0) return;
+    SDL_SetRenderDrawColor(renderer, 200, 200, 200, 200);
+    for (int x_pos = 0; x_pos <= map.width; ++x_pos) {
+        SDL_RenderDrawLine(renderer, x_pos * CELL_SIZE, 0, x_pos * CELL_SIZE, map.height * CELL_SIZE);
     }
-    printf("Drawing grid: map.width=%d, map.height=%d, window_width=%d, window_height=%d\n", map.width, map.height, window_width, window_height);
-    SDL_SetRenderDrawColor(renderer, WHITE.r, WHITE.g, WHITE.b, WHITE.a);
-    for (int i = 0; i <= map.height; i++) {
-        int y = i * CELL_SIZE;
-        printf("Horizontal line at y=%d\n", y);
-        SDL_RenderDrawLine(renderer, 0, y, window_width, y);
-    }
-    for (int j = 0; j <= map.width; j++) {
-        int x = j * CELL_SIZE;
-        printf("Vertical line at x=%d\n", x);
-        SDL_RenderDrawLine(renderer, x, 0, x, window_height);
+    for (int y_pos = 0; y_pos <= map.height; ++y_pos) {
+        SDL_RenderDrawLine(renderer, 0, y_pos * CELL_SIZE, map.width * CELL_SIZE, y_pos * CELL_SIZE);
     }
 }
 
 int draw_map() {
-    printf("draw_map: window_width=%d, window_height=%d, map.width=%d, map.height=%d\n", window_width, window_height, map.width, map.height);
-    printf("Drawing map...\n");
-    
-    // Handle SDL events
-    while (SDL_PollEvent(&event)) {
-        if (event.type == SDL_QUIT) {
-            running = 0;
-            return 1;
-        }
-    }
-    
-    // Clear the screen with black
-    SDL_SetRenderDrawColor(renderer, BLACK.r, BLACK.g, BLACK.b, BLACK.a);
+    if (!renderer) return -1;
+
+    SDL_SetRenderDrawColor(renderer, WHITE.r, WHITE.g, WHITE.b, SDL_ALPHA_OPAQUE);
     SDL_RenderClear(renderer);
-    printf("Screen cleared with black\n");
-    
-    // Draw grid first
-    printf("Drawing grid...\n");
+
     draw_grid();
-    
-    // Draw survivors
-    printf("Drawing survivors...\n");
     draw_survivors();
-    
-    // Draw drones
-    printf("Drawing drones...\n");
     draw_drones();
-    
-    // Present the rendered frame
+
     SDL_RenderPresent(renderer);
-    printf("Frame presented\n");
-    
     return 0;
 }
 
-void cleanup_sdl() {
-    if (renderer) {
-        SDL_DestroyRenderer(renderer);
-        renderer = NULL;
+int check_events() {
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) return 1;
+        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE)
+            return 1;
     }
-    if (window) {
-        SDL_DestroyWindow(window);
-        window = NULL;
-    }
-    SDL_Quit();
+    return 0;
 }
 
-void *view_thread_func(void *arg) {
-    (void)arg;
-    printf("View thread started\n");
-    while (running) {
-        if (draw_map() != 0) {
-            break;
-        }
-        SDL_Delay(100);  // Cap at 10 FPS
-    }
-    printf("View thread ending\n");
-    cleanup_sdl();
-    return NULL;
+void quit_all() {
+    if (renderer) SDL_DestroyRenderer(renderer);
+    if (window) SDL_DestroyWindow(window);
+    SDL_Quit();
+    printf("SDL Quit successfully.\n");
 }

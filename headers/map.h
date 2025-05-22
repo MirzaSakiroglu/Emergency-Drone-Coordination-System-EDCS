@@ -4,8 +4,6 @@
 #include "list.h"
 #include "coord.h"
 
-extern List *survivors;
-
 typedef struct mapcell {
     Coord coord;
     List *survivors;
