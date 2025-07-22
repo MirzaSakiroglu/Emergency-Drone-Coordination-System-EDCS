@@ -188,4 +188,4 @@ see [communication protocol details](communication-protocol.md)
 - **Recommended Libraries**:  
   - `json-c` (message parsing), `SDL2` (visualization).  
 
-
+  
