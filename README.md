@@ -1,191 +1,142 @@
-[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/Ckx1vpHM)
-GUNCELLEMELER
-```markdown
-   ## phase1'i yaparken (lab 10 yani),
-   locklari init etmeyi unutmayin (create_list icerisinde olabilir). Kodu test ederken once tum senkronizasyonlari devre disi birakin. Sonra adim adim tekrar yapin. Size verilen kod kismi olarak fikir vermesi bakimindan implementasyonlu verildi. Yoksa kod hatali!
-   
-   Listedeki add/remove/pop vb fonksiyonlara senkronizasyon ekledikten sonra bu fonksiyonlari cagirirken tekrardan lock/unlock yapmaniz gerekmiyor. Ancak iterasyon yaparsaniz onlarda ayni locki kullanmaniz gerekiyor.
-   
-   Buffer overflow/underflow vb leri icin semaphor yada condition variable kullanmaniz gerekiyor.
-   Drone datasina erisirken herbir droneun ayrica locki var onlarida kullanmayi ihmal etmeyin.
-   
-   ## Phase-2de
-   drone_fleet yerine drones listeyi kullanmaniz gerekiyor. Cunku drone ekleme ve cikarma gelen requestlerle oluyor.
-   
-   communication-protocol.md dosyasinda haberlesme icin kullanilacak komut listesi var. En az onlar olsun, fazlasi ihtiyaca gore ekleyebilirsiniz. JSON parse etme icin hazir kod kullanabilirsiniz.
-   
-   ## view.cde
-   listelerdeki locklardan bagimsiz bir yapiya kavusturursaniz iyi olur. Boylelikle, client tarafinda da kullanabilirsiniz. Bu durumda datayi kopyalamaniz veya verimli olmasi icin datadaki degisiklikleri gondermeniz gerekebilir. (snapshot aldiktan sonra o snapshota gore degisenler)
+# Emergency Drone Coordination System (EDCS)
+
+> A multi-threaded client-server system implemented in C that coordinates autonomous drone swarms using TCP sockets and thread-safe data structures. The project demonstrates high-concurrency handling through synchronized survivor tracking, real-time mission dispatching, and SDL-based visualization.
+
+---
+
+## Project Overview
+This project implements a scalable, multi-threaded drone coordination system designed to simulate and manage search-and-rescue operations. Transitioning from a local simulator to a distributed network architecture, the system enables drones (clients) to communicate with a central server via TCP sockets to receive missions and coordinate aid for survivors.
+
+The implementation mirrors real-world swarm logistics (e.g., Zipline, Amazon Prime Air), focusing on thread synchronization, network latency handling, and concurrent resource management.
+
+---
+
+## Architecture & Roadmap
+
+The project is structured into three distinct development phases, evolving from a single-process simulation to a fault-tolerant distributed system.
+
+### Phase 1: Core Synchronization & Simulation
+Focus: Thread safety, Mutex locking, and Local Simulation.
+
+* Thread-Safe Data Structures: Implementation of concurrent linked lists using pthread_mutex_t to handle race conditions during add, remove, and pop operations.
+* Memory Management: Rigorous leak prevention in node destruction and buffer overflow protection using snprintf.
+* Drone Logic: Drones operate as independent threads, calculating movement vectors towards targets.
+* Survivor Generation: A separate thread generates random survivor coordinates to populate the synchronized mission list.
+* Visualization: SDL-based rendering of the simulation grid (Red = Survivors, Blue = Drones, Green = Active Missions).
+
+### Phase 2: Networked Communication Layer
+Focus: Sockets, TCP/IP, and Client-Server Protocol.
+
+* Server Architecture: A multi-threaded server listens for incoming drone connections and maintains the global state of the simulation.
+* Drone Client: Drones transition from threads to standalone processes that connect to the server, sending JSON status updates.
+* AI Controller: The server implements a dispatch algorithm to assign the closest idle drone to the oldest unhelped survivor, ensuring fairness and efficiency.
+* Protocol: Custom JSON-based protocol for STATUS_UPDATE, ASSIGN_MISSION, and HEARTBEAT messages. 
+    * See communication-protocol.md for full specs.
+
+### Phase 3: Scalability & Optimization
+Focus: Load Testing, Fault Tolerance, and QoS.
+
+* High Concurrency: Optimized to handle 50+ concurrent drone connections.
+* Fault Tolerance: Server logic detects disconnected drones (timeouts) and reassigns their missions to active agents.
+* Advanced UI: Remote monitoring via WebSocket dashboard or a networked SDL client view.
+
+---
+
+## Technical Implementation
+
+### 1. Data Structures & Concurrency
+The core of the simulation relies on a custom List struct in list.h. Synchronization is granular:
+* Locking Strategy: Mutexes are employed only during critical sections (modification of the list or node iteration) to maximize performance.
+* Resource Management: A "Free List" mechanism is implemented to reuse nodes, reducing malloc/free overhead during high-frequency updates.
+
+### 2. Simulation Logic (Snippets)
+
+Drone Autonomous Behavior
+Each drone runs a behavior loop that handles movement logic and thread locking:
+```c
+void* drone_behavior(void *arg) {
+    Drone *d = (Drone*)arg;
+    
+    while(1) {
+        pthread_mutex_lock(&d->lock);
+        
+        if(d->status == ON_MISSION) {
+            // Logic to move 1 cell closer to target
+            if(d->coord.x < d->target.x) d->coord.x++;
+            else if(d->coord.x > d->target.x) d->coord.x--;
+            
+            if(d->coord.y < d->target.y) d->coord.y++;
+            else if(d->coord.y > d->target.y) d->coord.y--;
+
+            // Check for arrival
+            if(d->coord.x == d->target.x && d->coord.y == d->target.y) {
+                d->status = IDLE;
+                printf("Drone %d: Mission completed!\n", d->id);
+            }
+        }
+        
+        pthread_mutex_unlock(&d->lock);
+        sleep(1); // Simulation tick
+    }
+    return NULL;
+}
+
+Server Connection Handler: The server accepts connections and spawns handlers for each drone
+```c
+while (1) {
+    int drone_fd = accept(server_fd, (struct sockaddr*)&client_addr, &addr_len);
+    // Spawn a new thread to handle this specific drone connection
+    pthread_create(&thread_id, NULL, handle_drone, (void*)&drone_fd);
+}
 ```
 
-## **Project: Emergency Drone Coordination System (Client-Server app)**  
+### 3. Communication Protocol
 
-**Objective**:  
-Transition from a simulator to a real client-server system where drones (clients) communicate with a central server to coordinate emergency aid for survivors (simulated by random generations). Students will implement synchronization, thread-safe data structures, and networked communication, mirroring real-world drone swarm coordination systems.
+Data is exchanged in JSON format for readability and extensibility.
 
----
+Drone to Server (Status Update):
+```
+JSON
+{ 
+    "drone_id": "D1", 
+    "status": "idle", 
+    "location": [10, 20] 
+}
+```
 
-### **Phased Implementation Plan**  
-#### **Phase 1 (given as a lab): Thread-Safe Lists & Simulated Clients/Servers**  
-**Objective**: Implement synchronization and simulate client-server interactions using threads **(no sockets yet, drones are simulated as threads)**.  
-**Duration**: 1 week  
- 
-In the lab you will implement the synchronized lists necessary for the project. For instance, in Java there are conccurent data structures[see the link](https://docs.oracle.com/en/java/javase/11/docs/api/java.base/java/util/concurrent/package-summary.html) they provide thread safe datastructures.
+Server to Drone (Mission Assignment):
+```
+JSON
+{ 
+    "type": "mission", 
+    "target": [45, 12] 
+}
+```
 
-**In this thread safe data structures, you still need to use locks when you try to iterate over them.**  
-- You are given a partially implemented simulator. You need to implement synchronizations in the list. And change the lock/unlock mechanism in the simulator code.
+## 🛠 Dependencies & Build
+Language: C (C11 Standard)
 
-**Tasks**:  
-1. **Fix and Enhance the List Implementation**:  
-   - **Mandatory Fixes**:  
-     - Add `pthread_mutex_t` to the `List` struct in `list.h` and synchronize all operations (`add`, `remove`, `pop`).  
-     - Fix memory leaks in `destroy()` by removing redundant `memset`.  
-     - Replace `sprintf` with `snprintf` in `listtest.c` to prevent buffer overflows. 
-     - Remove unnecessary locks/unlocks
-       - use only in iterations(next etc) 
-   - **Optional Efficiency Improvements**:  
-     - Implement a *free list* to reuse nodes and reduce allocation overhead.
+Visualization: SDL2
 
-2. **Simulate Drones and Survivors with Threads**:  
-   - **Drone Simulator Thread**:  
-     ```c  
-      void* drone_behavior(void *arg) {
-          Drone *d = (Drone*)arg;
-          
-          while(1) {
-              pthread_mutex_lock(&d->lock);
-              
-              if(d->status == ON_MISSION) {
-                  // Move toward target (1 cell per iteration)
-                  if(d->coord.x < d->target.x) d->coord.x++;
-                  else if(d->coord.x > d->target.x) d->coord.x--;
-                  
-                  if(d->coord.y < d->target.y) d->coord.y++;
-                  else if(d->coord.y > d->target.y) d->coord.y--;
+Data Parsing: json-c
 
-                  // Check mission completion
-                  if(d->coord.x == d->target.x && d->coord.y == d->target.y) {
-                      d->status = IDLE;
-                      printf("Drone %d: Mission completed!\n", d->id);
-                  }
-              }
-              
-              pthread_mutex_unlock(&d->lock);
-              sleep(1); // Update every second
-          }
-          return NULL;
-      } 
-     ```  
-   - **Survivor Generator Thread**:  
-     ```c  
-     void* survivor_generator(void* arg) {  
-         while (1) {  
-             // Generate random survivors  
-             // Add to synchronized `survivor_list`  
-             sleep(2);  
-         }  
-     }  
-     ```  
+System: Linux/Unix (requires pthread library)
 
-3. **Visualize with SDL**:  
-   - Update `view.c` to show:  
-     - Survivors as **red cells**, idle drones as **blue dots**, and missions as **green lines**.  
+Visualization Key
 
----
+The SDL view provides real-time feedback on the system state:
 
-#### **Phase 2: Basic Socket Communication**  
-see [communication protocol details](communication-protocol.md)
+🔴 Red Cells: Survivors awaiting aid.
 
-**Objective**: Replace simulated threads with real socket-based clients and servers.  
-**Duration**: 1 week (after socket lectures)  
+🔵 Blue Dots: Idle drones patrolling or waiting.
 
-**Tasks**:  
-1. **Server Implementation**:  
-   - Create a multi-threaded server that:  
-     - Listens for incoming drone connections (TCP).  
-     - Maintains a synchronized list of active drones and survivors.  
-   - Example server loop:  
-     ```c  
-     while (1) {  
-         int drone_fd = accept(server_fd, (struct sockaddr*)&client_addr, &addr_len);  
-         pthread_create(&thread_id, NULL, handle_drone, (void*)&drone_fd);  
-     }  
-     ```  
+🟢 Green Lines: Active mission vectors (Drone → Survivor).
 
-2. **Drone Client Implementation**:  
-   - Drones connect to the server and send periodic status updates (JSON format):  
-     ```json  
-     { "drone_id": "D1", "status": "idle", "location": [10, 20] }  
-     ```  
-   - Receive mission assignments (e.g., `{"type": "mission", "target": [x, y]}`).  
+## Key Features
+Thread Synchronization: Robust use of mutexes to prevent race conditions in shared lists.
 
-3. **AI Controller Logic**:  
-   - Assign closest idle drone to the oldest unhelped survivor (prioritize fairness).  
+Networked AI: Centralized decision-making server managing distributed clients.
 
----
+Real-time Visualization: Graphical representation of the swarm logic.
 
-#### **Phase 3: Advanced Features & Testing**  
-**Objective**: Optimize performance and handle edge cases.  
-**Duration**: 1 week  
-
-**Tasks**:  
-1. **Load Testing**:  
-   - Simulate 50+ drones and measure server throughput.  
-2. **Fault Tolerance**:  
-   - Handle disconnected drones (e.g., reassign missions after timeout).  
-3. **Optional Extensions**:  
-   - Add a web-based dashboard using WebSocket for real-time monitoring.
-     - Or you can use view.c as a client version
-     - Server sends the changes to the client or the whole data and client shows it
-   - Implement QoS (quality of service) e.g., prioritize critically injured survivors.  
-
----
-
-### **Technical Components**  
-#### **Client (Drone)**  
-- **Key Functions**:  
-  - `connect_to_server()`: Establishes TCP connection.  
-  - `send_status_update()`: Periodically reports drone state.  
-  - `navigate_to_target()`: Simulates movement toward survivor coordinates.  
-
-#### **Server**  
-- **Key Functions**:  
-  - `handle_drone()`: Thread to manage each drone connection.  
-  - `assign_missions()`: AI logic to match drones and survivors.  
-  - `log_performance()`: Track average survivor wait time and drone utilization.  
-
-#### **Communication Protocol (see [communcation-protocol.md](communication-protocol.md))**  
-- **Messages**:  
-  - Drone → Server: `STATUS_UPDATE`, `MISSION_COMPLETE`.  
-  - Server → Drone: `ASSIGN_MISSION`, `HEARTBEAT`.  
-- **Format**: JSON (simple, human-readable).  
-
----
-
-### **Learning Outcomes**  
-1. **Core Skills**:  
-   - Thread synchronization (mutexes), socket programming, and client-server design.  
-2. **Real-World Relevance**:  
-   - Mirrors systems like Zipline’s medical delivery drones or Amazon’s delivery swarms.  
-3. **Problem Solving**:  
-   - Debug race conditions, optimize latency, and handle scalability.  
-
----
-
-### **Grading Criteria**  
-- **Code (50%)**:  
-  - Thread-safe lists, working socket communication, AI logic.  
-- **Report (25%)**:  
-  - Explain design choices, synchronization strategy, and performance analysis.  
-- **Demo (25%)**:  
-  - Show handling of 10+ concurrent drones with real-time SDL visualization.  
-
----
-
-### **Tools & Starter Code**  
-- **Provided**:  
-  -  `list.h/c` (needs to be fixed), SDL visualization framework, a simulator code as skeleton.  
-- **Recommended Libraries**:  
-  - `json-c` (message parsing), `SDL2` (visualization).  
-
-  
+Fault Tolerance: Handles client disconnections and dynamic re-tasking.
