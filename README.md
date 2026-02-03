@@ -1,6 +1,6 @@
 # Emergency Drone Coordination System (EDCS)
 
-> A multi-threaded client-server system implemented in C that coordinates autonomous drone swarms using TCP sockets and thread-safe data structures. The project demonstrates high-concurrency handling through synchronized survivor tracking, real-time mission dispatching, and SDL-based visualization.
+A multi-threaded client-server system implemented in C that coordinates autonomous drone swarms using TCP sockets and thread-safe data structures. The project demonstrates high-concurrency handling through synchronized survivor tracking, real-time mission dispatching, and SDL-based visualization.
 
 ---
 
