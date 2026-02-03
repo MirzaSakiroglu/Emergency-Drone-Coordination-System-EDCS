@@ -114,29 +114,29 @@ JSON
 ```
 
 ## 🛠 Dependencies & Build
-Language: C (C11 Standard)
+* Language: C (C11 Standard)
 
-Visualization: SDL2
+* Visualization: SDL2
 
-Data Parsing: json-c
+* Data Parsing: json-c
 
-System: Linux/Unix (requires pthread library)
+* System: Linux/Unix (requires pthread library)
 
-Visualization Key
+### Visualization Key
 
 The SDL view provides real-time feedback on the system state:
 
-🔴 Red Cells: Survivors awaiting aid.
+* 🔴 Red Cells: Survivors awaiting aid.
 
-🔵 Blue Dots: Idle drones patrolling or waiting.
+* 🔵 Blue Dots: Idle drones patrolling or waiting.
 
-🟢 Green Lines: Active mission vectors (Drone → Survivor).
+* 🟢 Green Lines: Active mission vectors (Drone → Survivor).
 
 ## Key Features
-Thread Synchronization: Robust use of mutexes to prevent race conditions in shared lists.
+* Thread Synchronization: Robust use of mutexes to prevent race conditions in shared lists.
 
-Networked AI: Centralized decision-making server managing distributed clients.
+* Networked AI: Centralized decision-making server managing distributed clients.
 
-Real-time Visualization: Graphical representation of the swarm logic.
+* Real-time Visualization: Graphical representation of the swarm logic.
 
-Fault Tolerance: Handles client disconnections and dynamic re-tasking.
+* Fault Tolerance: Handles client disconnections and dynamic re-tasking.
